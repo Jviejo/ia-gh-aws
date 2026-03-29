@@ -93,7 +93,8 @@ jobs:
               set -e
 
               # Extract artifact
-              mkdir -p ${{ secrets.EC2_DEPLOY_PATH }}
+              sudo mkdir -p ${{ secrets.EC2_DEPLOY_PATH }}
+              sudo chown ${{ secrets.EC2_USER }}:${{ secrets.EC2_USER }} ${{ secrets.EC2_DEPLOY_PATH }}
               tar -xzf /tmp/deploy.tar.gz -C ${{ secrets.EC2_DEPLOY_PATH }}
               rm /tmp/deploy.tar.gz
 
