@@ -1,0 +1,111 @@
+name: Build & Deploy to AWS EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Build → Package → Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+        env:
+          NODE_ENV: production
+
+      - name: Package artifact
+        run: |
+          tar -czf deploy.tar.gz \
+            .next \
+            public \
+            package.json \
+            package-lock.json
+
+      - name: Setup SSH key
+        run: |
+          install -m 600 -D /dev/null ~/.ssh/ec2_key
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload artifact to EC2
+        run: |
+          scp -i ~/.ssh/ec2_key \
+            deploy.tar.gz \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/deploy.tar.gz
+
+      - name: Create systemd service (idempotent)
+        run: |
+          ssh -i ~/.ssh/ec2_key \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} \
+            "
+              set -e
+              SERVICE=/etc/systemd/system/ia-codecrypto.service
+
+              if [ ! -f \"\$SERVICE\" ]; then
+                echo 'Creating systemd service...'
+                sudo tee \"\$SERVICE\" > /dev/null << 'UNIT'
+          [Unit]
+          Description=CodeCrypto IA — Next.js app
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=${{ secrets.EC2_USER }}
+          WorkingDirectory=${{ secrets.EC2_DEPLOY_PATH }}
+          ExecStart=/usr/bin/npm start
+          Restart=on-failure
+          RestartSec=5
+          Environment=NODE_ENV=production
+          Environment=PORT=3000
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+                echo 'Service file created.'
+              else
+                echo 'Service file already exists, skipping creation.'
+              fi
+            "
+
+      - name: Deploy & restart service on EC2
+        run: |
+          ssh -i ~/.ssh/ec2_key \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} \
+            "
+              set -e
+
+              # Extract artifact
+              mkdir -p ${{ secrets.EC2_DEPLOY_PATH }}
+              tar -xzf /tmp/deploy.tar.gz -C ${{ secrets.EC2_DEPLOY_PATH }}
+              rm /tmp/deploy.tar.gz
+
+              # Install production dependencies only
+              cd ${{ secrets.EC2_DEPLOY_PATH }}
+              npm ci --omit=dev
+
+              # Reload and restart service
+              sudo systemctl daemon-reload
+              sudo systemctl enable ia-codecrypto
+              sudo systemctl restart ia-codecrypto
+
+              echo 'Deployment complete'
+            "
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/ec2_key
